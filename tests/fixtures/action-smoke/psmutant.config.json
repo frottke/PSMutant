@@ -1,0 +1,25 @@
+{
+  "sandboxSubtrees": [
+    "src",
+    "tests"
+  ],
+  "mutate": [
+    "src/calc.ps1"
+  ],
+  "tests": {
+    "src/calc.ps1": [
+      "tests/calc.Tests.ps1"
+    ]
+  },
+  "coveredLinesOnly": true,
+  "operators": [
+    "BinaryOperator",
+    "BooleanLiteral"
+  ],
+  "thresholds": {
+    "high": 85,
+    "low": 70,
+    "break": null
+  },
+  "reportPath": "reports/action-smoke.json"
+}

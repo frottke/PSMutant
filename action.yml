@@ -1,0 +1,75 @@
+name: PSMutant
+description: Run PowerShell mutation tests with Pester in GitHub Actions
+
+inputs:
+  config-file:
+    description: PSMutant config file, relative to the GitHub workspace
+    required: false
+    default: psmutant.config.json
+  source-root:
+    description: Source directory, relative to the GitHub workspace
+    required: false
+    default: .
+  mode:
+    description: "auto (PR changes, full elsewhere), full, or changed (PR only)"
+    required: false
+    default: auto
+  pester-version:
+    description: Exact Pester version to install and load
+    required: false
+    default: '6.2.0'
+  quiet:
+    description: Suppress per-mutant console output (CI annotations remain)
+    required: false
+    default: 'true'
+
+outputs:
+  score:
+    description: Mutation score, empty when the selected source tree was not changed
+    value: ${{ steps.mutation.outputs.score }}
+  killed:
+    description: Number of killed mutants
+    value: ${{ steps.mutation.outputs.killed }}
+  survived:
+    description: Number of surviving mutants
+    value: ${{ steps.mutation.outputs.survived }}
+  total:
+    description: Number of scored mutants
+    value: ${{ steps.mutation.outputs.total }}
+  mode:
+    description: Full or Changed
+    value: ${{ steps.mutation.outputs.mode }}
+  exit-code:
+    description: PSMutant exit code (0 or 1), even when the Action fails
+    value: ${{ steps.mutation.outputs.exit-code }}
+  failure-reason:
+    description: None, BelowThreshold, or StaleEquivalents
+    value: ${{ steps.mutation.outputs.failure-reason }}
+  skipped:
+    description: True only when a valid PR diff contains no changes under source-root
+    value: ${{ steps.mutation.outputs.skipped }}
+
+runs:
+  using: composite
+  steps:
+    - name: Run PSMutant
+      id: mutation
+      shell: pwsh
+      env:
+        PSMUTANT_CONFIG_FILE: ${{ inputs.config-file }}
+        PSMUTANT_SOURCE_ROOT: ${{ inputs.source-root }}
+        PSMUTANT_MODE: ${{ inputs.mode }}
+        PSMUTANT_PESTER_VERSION: ${{ inputs.pester-version }}
+        PSMUTANT_QUIET: ${{ inputs.quiet }}
+      run: |
+        & (Join-Path $env:GITHUB_ACTION_PATH 'action/Invoke-Action.ps1')
+
+    - name: Enforce mutation gate
+      shell: pwsh
+      env:
+        PSMUTANT_EXIT_CODE: ${{ steps.mutation.outputs.exit-code }}
+        PSMUTANT_FAILURE_REASON: ${{ steps.mutation.outputs.failure-reason }}
+      run: |
+        if ($env:PSMUTANT_EXIT_CODE -ne '0') {
+          throw "Mutation gate failed: $env:PSMUTANT_FAILURE_REASON (exit code $env:PSMUTANT_EXIT_CODE)."
+        }

@@ -1,0 +1,99 @@
+name: Composite action smoke
+
+on:
+  push:
+    paths:
+      - action.yml
+      - action/**
+      - tests/Action.Tests.ps1
+      - tests/fixtures/action-smoke/**
+      - .github/workflows/action-smoke.yml
+  pull_request:
+    paths:
+      - action.yml
+      - action/**
+      - tests/Action.Tests.ps1
+      - tests/fixtures/action-smoke/**
+      - .github/workflows/action-smoke.yml
+
+permissions:
+  contents: read
+
+jobs:
+  action-smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run composite action against the checked-out module
+        id: mutation
+        uses: ./
+        with:
+          config-file: tests/fixtures/action-smoke/psmutant.config.json
+          source-root: tests/fixtures/action-smoke
+          mode: full
+          pester-version: '6.2.0'
+
+      - name: Verify a real (non-vacuous) mutation score
+        shell: pwsh
+        env:
+          SCORE: ${{ steps.mutation.outputs.score }}
+          KILLED: ${{ steps.mutation.outputs.killed }}
+          SURVIVED: ${{ steps.mutation.outputs.survived }}
+          TOTAL: ${{ steps.mutation.outputs.total }}
+          MODE: ${{ steps.mutation.outputs.mode }}
+          SKIPPED: ${{ steps.mutation.outputs.skipped }}
+        run: |
+          if ([int]$env:TOTAL -lt 2 -or [int]$env:KILLED -lt 1 -or [int]$env:SURVIVED -lt 1) {
+            throw 'Action did not return both killed and surviving mutants.'
+          }
+          if ($env:MODE -ne 'Full' -or $env:SKIPPED -ne 'false') {
+            throw 'Action returned the wrong mode or skipped a full run.'
+          }
+          $score = [double]::Parse($env:SCORE, [cultureinfo]::InvariantCulture)
+          if ($score -le 0 -or $score -ge 100) { throw 'Action reported a vacuous score.' }
+
+      - name: Verify that a failing threshold fails the action
+        id: reject
+        continue-on-error: true
+        uses: ./
+        with:
+          config-file: tests/fixtures/action-smoke/psmutant.fail.config.json
+          source-root: tests/fixtures/action-smoke
+          mode: full
+          pester-version: '6.2.0'
+
+      - name: Verify the action preserved the failing verdict
+        if: always()
+        shell: pwsh
+        env:
+          OUTCOME: ${{ steps.reject.outcome }}
+          REASON: ${{ steps.reject.outputs.failure-reason }}
+          EXIT_CODE: ${{ steps.reject.outputs.exit-code }}
+        run: |
+          if ($env:OUTCOME -ne 'failure') { throw "Expected action failure, got $env:OUTCOME" }
+          if ($env:REASON -ne 'BelowThreshold' -or $env:EXIT_CODE -ne '1') {
+            throw "Expected BelowThreshold and exit-code 1, got $env:REASON and $env:EXIT_CODE"
+          }
+
+      - name: Test action integration decisions
+        shell: pwsh
+        run: |
+          $path = Join-Path $env:RUNNER_TEMP 'psmutant-dependencies/Pester/6.2.0/Pester.psd1'
+          if (Test-Path -LiteralPath $path) {
+            Import-Module $path -ErrorAction Stop
+          } else {
+            Import-Module Pester -RequiredVersion 6.2.0 -ErrorAction Stop
+          }
+          $r = Invoke-Pester -Path ./tests/Action.Tests.ps1 -PassThru
+          if ($r.FailedCount -gt 0 -or $r.PassedCount -eq 0) {
+            throw "Action integration tests failed: $($r.FailedCount) failed, $($r.PassedCount) passed."
+          }

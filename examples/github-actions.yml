@@ -1,0 +1,38 @@
+# Copy this into .github/workflows/mutation-testing.yml in your PowerShell project.
+# Pin Fortigi/PSMutant to a released commit SHA for production use.
+# Pester is installed by the composite action; pwsh must be available on the runner.
+name: Mutation testing
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  mutation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The pull-request base SHA must be locally available for the changed-file mode.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run PSMutant
+        id: mutation
+        uses: Fortigi/PSMutant@main # Replace with a released commit SHA
+        with:
+          config-file: psmutant.config.json
+          pester-version: '6.2.0'
+          mode: auto
+
+      - name: Keep mutation reports on pass and failure
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mutation-results
+          path: reports/
+          if-no-files-found: ignore

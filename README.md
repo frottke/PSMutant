@@ -130,6 +130,54 @@ use either has.
 Restricting mutants to changed **lines** is not implemented. It needs hunk offsets, which have the
 same problem `-ChangedSince` has and no agreed shape yet.
 
+### GitHub Actions composite action
+
+The repository also provides a composite action at its root. It runs the matching
+PSMutant source directly from the selected action ref, downloads an exact Pester version
+if needed (to an action-local directory), runs the mutation gate, adds a job summary,
+and exposes score, counts, scope and failure reason as step outputs.
+
+See [the complete GitHub workflow example](examples/github-actions.yml). After the
+action is released, pin the `Fortigi/PSMutant` reference to a commit SHA.
+
+```yaml
+- uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+  with:
+    fetch-depth: 0
+    persist-credentials: false
+
+- uses: Fortigi/PSMutant@main # Replace with a released commit SHA
+  id: mutation
+  with:
+    config-file: psmutant.config.json
+    mode: auto
+    pester-version: '6.2.0'
+```
+
+`mode: auto` performs a full run on pushes and a `-ChangedFile` run on
+`pull_request`. The latter requires the PR base commit to be available locally,
+which is why the checkout uses `fetch-depth: 0`; an unavailable base fails
+instead of silently passing. A valid PR diff with no files under `source-root`
+skips only that package and returns `skipped=true` with no fabricated score.
+`mode: full` always measures the full configured tree; `mode: changed` is
+available only for pull-request events.
+
+`config-file` and `source-root` are resolved relative to the GitHub workspace
+(defaults `psmutant.config.json` and `.`). Config paths inside the JSON remain
+relative to `source-root`. The `quiet` input defaults to `true`. PSMutant
+needs PowerShell 7+ and Pester 5.2+; the action defaults to Pester 6.2.0 and
+allows an exact `pester-version` override (use Pester 5.x with PowerShell
+7.0 through 7.3).
+
+Outputs: `score`, `killed`, `survived`, `total`, `mode`,
+`exit-code`, `failure-reason` and `skipped`. An unmet
+`thresholds.break` or a stale equivalent declaration fails the step
+**after** outputs and the summary are written. Upload reports from a
+separate step using `if: always()`, so failing runs keep their evidence.
+SARIF upload is deliberately left to the consumer. In particular, do not
+upload a changed-file SARIF as the full project's log: doing so would close
+alerts for files the PR did not examine.
+
 ### In CI: survivors on the pull request
 
 Two ways to put a survivor in front of a reviewer instead of in job-log scrollback. Both list
