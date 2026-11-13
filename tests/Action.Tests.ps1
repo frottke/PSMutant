@@ -76,7 +76,11 @@ Describe 'Write-ActionResult' {
         Write-ActionResult -Skipped
         $output = Get-Content $env:GITHUB_OUTPUT -Raw
         $output | Should -Match 'skipped=true'
-        $output | Should -Match '(?m)^score=$'
+        $output | Should -Match '(?m)^score=\r?
+        (Get-Content $env:GITHUB_STEP_SUMMARY -Raw) | Should -Match 'Skipped'
+    }
+}
+
         (Get-Content $env:GITHUB_STEP_SUMMARY -Raw) | Should -Match 'Skipped'
     }
 }
