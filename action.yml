@@ -1,5 +1,5 @@
 name: PSMutant
-description: Run PowerShell mutation tests with Pester in GitHub Actions
+description: Run the manifest-matched PSGallery release of PSMutant in GitHub Actions
 
 inputs:
   config-file:
@@ -15,9 +15,9 @@ inputs:
     required: false
     default: auto
   pester-version:
-    description: Exact Pester version to install and load
+    description: Optional exact Pester version; empty chooses latest stable compatible PSGallery version
     required: false
-    default: '6.2.0'
+    default: ''
   quiet:
     description: Suppress per-mutant console output (CI annotations remain)
     required: false
@@ -48,6 +48,15 @@ outputs:
   skipped:
     description: True only when a valid PR diff contains no changes under source-root
     value: ${{ steps.mutation.outputs.skipped }}
+  psmutant-version:
+    description: Loaded PSMutant version, determined by the pinned manifest
+    value: ${{ steps.mutation.outputs.psmutant-version }}
+  pester-version:
+    description: Loaded Pester version
+    value: ${{ steps.mutation.outputs.pester-version }}
+  powershell-version:
+    description: PowerShell runtime version
+    value: ${{ steps.mutation.outputs.powershell-version }}
 
 runs:
   using: composite

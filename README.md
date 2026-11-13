@@ -132,13 +132,18 @@ same problem `-ChangedSince` has and no agreed shape yet.
 
 ### GitHub Actions composite action
 
-The repository also provides a composite action at its root. It runs the matching
-PSMutant source directly from the selected action ref, downloads an exact Pester version
-if needed (to an action-local directory), runs the mutation gate, adds a job summary,
-and exposes score, counts, scope and failure reason as step outputs.
+The composite action uses the `ModuleVersion` from its own `PSMutant.psd1` at the
+pinned commit SHA and downloads **exactly that version** from PSGallery. No
+PSMutant version input is required. The module is never loaded from the action
+checkout. Pin to a **published release commit**: an unpublished module version
+will fail rather than silently selecting a different version.
 
-See [the complete GitHub workflow example](examples/github-actions.yml). After the
-action is released, pin the `Fortigi/PSMutant` reference to a commit SHA.
+Pester is downloaded separately from PSGallery. Without `pester-version`, the
+action resolves the latest stable version compatible with the runner's
+PowerShell version. An exact override remains available. Both modules are
+staged in `RUNNER_TEMP`, leaving system module installations unchanged.
+
+See [the complete GitHub workflow example](examples/github-actions.yml).
 
 ```yaml
 - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -146,37 +151,27 @@ action is released, pin the `Fortigi/PSMutant` reference to a commit SHA.
     fetch-depth: 0
     persist-credentials: false
 
-- uses: Fortigi/PSMutant@main # Replace with a released commit SHA
+- uses: Fortigi/PSMutant@<published-release-commit-sha>
   id: mutation
   with:
     config-file: psmutant.config.json
     mode: auto
-    pester-version: '6.2.0'
 ```
 
-`mode: auto` performs a full run on pushes and a `-ChangedFile` run on
-`pull_request`. The latter requires the PR base commit to be available locally,
-which is why the checkout uses `fetch-depth: 0`; an unavailable base fails
-instead of silently passing. A valid PR diff with no files under `source-root`
-skips only that package and returns `skipped=true` with no fabricated score.
-`mode: full` always measures the full configured tree; `mode: changed` is
-available only for pull-request events.
+`mode: auto` runs changed-file mutation testing on pull requests and full
+testing on pushes. Pull requests require `fetch-depth: 0` for a valid base
+comparison. `mode: full` and `mode: changed` are also available.
 
-`config-file` and `source-root` are resolved relative to the GitHub workspace
-(defaults `psmutant.config.json` and `.`). Config paths inside the JSON remain
-relative to `source-root`. The `quiet` input defaults to `true`. PSMutant
-needs PowerShell 7+ and Pester 5.2+; the action defaults to Pester 6.2.0 and
-allows an exact `pester-version` override (use Pester 5.x with PowerShell
-7.0 through 7.3).
+Inputs `config-file` and `source-root` are relative to the GitHub workspace.
+The `quiet` input defaults to `true`. Outputs include `score`, `killed`,
+`survived`, `total`, `mode`, `exit-code`, `failure-reason`, `skipped`,
+`psmutant-version`, `pester-version`, and `powershell-version`. Loaded versions
+are also included in the step summary. Mutation gate failures preserve the
+outputs and summary. Upload reports in a separate `if: always()` step.
 
-Outputs: `score`, `killed`, `survived`, `total`, `mode`,
-`exit-code`, `failure-reason` and `skipped`. An unmet
-`thresholds.break` or a stale equivalent declaration fails the step
-**after** outputs and the summary are written. Upload reports from a
-separate step using `if: always()`, so failing runs keep their evidence.
-SARIF upload is deliberately left to the consumer. In particular, do not
-upload a changed-file SARIF as the full project's log: doing so would close
-alerts for files the PR did not examine.
+Development commits whose manifest versions are not yet published can validate
+the wrapper with isolated tests. End-to-end execution of the pinned action
+requires the matching Gallery package to be published.
 
 ### In CI: survivors on the pull request
 

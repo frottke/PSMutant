@@ -50,48 +50,139 @@ function Get-ActionChangedFiles {
     return $relative
 }
 
-function Import-ActionPester {
+function Get-ActionPSMutantVersion {
     [CmdletBinding()]
-    param([Parameter(Mandatory)] [string]$Version)
+    param([Parameter(Mandatory)] [string]$ActionPath)
 
-    if ($Version -notmatch '^\d+\.\d+\.\d+$') {
-        throw "pester-version must be an exact major.minor.patch version, got '$Version'."
+    $manifestPath = Join-Path $ActionPath 'PSMutant.psd1'
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        throw "Missing PSMutant.psd1 in pinned action: $manifestPath"
     }
-    $wanted = [version]$Version
-    if ($wanted -lt [version]'5.2.0') {
-        throw 'PSMutant requires Pester 5.2.0 or later.'
+    $metadata = Import-PowerShellDataFile -Path $manifestPath
+    $version = [string]$metadata.ModuleVersion
+    if ($version -notmatch '^\d+\.\d+\.\d+(\.\d+)?$') {
+        throw "Invalid ModuleVersion '$version' in pinned action manifest."
     }
-    if ($PSVersionTable.PSVersion -lt [version]'7.4' -and $wanted.Major -ge 6) {
-        throw 'On PowerShell 7.0 through 7.3, select Pester 5.x (for example 5.7.1).'
-    }
-    $loaded = Get-Module -Name Pester
-    if ($loaded -and $loaded.Version -ne $wanted) {
-        throw "Pester $($loaded.Version) is already loaded; cannot safely load $Version in the same process."
-    }
+    return $version
+}
 
-    $available = Get-Module -ListAvailable -Name Pester |
-        Where-Object { $_.Version -eq $wanted } | Select-Object -First 1
-    if ($available) {
-        Import-Module -Name $available.Path -ErrorAction Stop
-    }
-    else {
-        # Action-local install avoids admin rights, CurrentUser module paths, and version clashes.
-        $stage = Join-Path $env:RUNNER_TEMP 'psmutant-dependencies'
-        New-Item -ItemType Directory -Path $stage -Force | Out-Null
-        Write-Host "Downloading Pester $Version into $stage"
-        Save-Module -Name Pester -RequiredVersion $Version -Path $stage -Force -ErrorAction Stop
-        $manifest = Join-Path $stage "Pester/$Version/Pester.psd1"
-        if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
-            throw "Pester $Version was downloaded but $manifest is missing."
+function Test-ActionPesterCompatibility {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [version]$Version,
+        [Parameter(Mandatory)] [version]$PowerShellVersion
+    )
+    if ($PowerShellVersion -lt [version]'7.0' -or $Version -lt [version]'5.2.0') { return $false }
+    # Pester 5.9+ and Pester 6 are supported with PowerShell 7.4+.
+    if ($PowerShellVersion -lt [version]'7.4' -and $Version -ge [version]'5.9.0') { return $false }
+    return $true
+}
+
+function Resolve-ActionPesterVersion {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyString()] [string]$RequestedVersion = '',
+        [version]$PowerShellVersion = $PSVersionTable.PSVersion
+    )
+    if (-not [string]::IsNullOrWhiteSpace($RequestedVersion)) {
+        if ($RequestedVersion -notmatch '^\d+\.\d+\.\d+$') {
+            throw "pester-version requires an exact major.minor.patch version; got '$RequestedVersion'."
         }
-        Import-Module -Name $manifest -ErrorAction Stop
+        if (-not (Test-ActionPesterCompatibility -Version ([version]$RequestedVersion) -PowerShellVersion $PowerShellVersion)) {
+            throw "Pester $RequestedVersion is not supported by this action on PowerShell $PowerShellVersion."
+        }
+        return $RequestedVersion
     }
 
-    $actual = Get-Module -Name Pester
-    if (-not $actual -or $actual.Version -ne $wanted) {
-        throw "Pester $Version was not loaded successfully."
+    # Find-Module excludes prereleases unless AllowPrerelease is requested.
+    $releases = @(Find-Module -Name Pester -AllVersions -Repository PSGallery -ErrorAction Stop)
+    $compatible = @($releases | Where-Object {
+            $candidate = [string]$_.Version
+            if ($candidate -notmatch '^\d+\.\d+\.\d+(\.\d+)?$') { return $false }
+            if (-not (Test-ActionPesterCompatibility -Version ([version]$candidate) -PowerShellVersion $PowerShellVersion)) {
+                return $false
+            }
+            $minimum = [string]$_.PowerShellVersion
+            return [string]::IsNullOrWhiteSpace($minimum) -or [version]$minimum -le $PowerShellVersion
+        } | Sort-Object -Property Version -Descending)
+    if ($compatible.Count -eq 0) {
+        throw "PSGallery has no supported stable Pester release for PowerShell $PowerShellVersion."
     }
-    Write-Host "Using Pester $($actual.Version)"
+    return [string]$compatible[0].Version
+}
+
+function Save-ActionGalleryModule {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [ValidateSet('PSMutant', 'Pester')] [string]$Name,
+        [Parameter(Mandatory)] [string]$Version,
+        [Parameter(Mandatory)] [string]$Destination
+    )
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    Write-Host "Downloading $Name $Version from PSGallery."
+    try {
+        Save-Module -Name $Name -RequiredVersion $Version -Repository PSGallery -Path $Destination -Force -ErrorAction Stop
+    }
+    catch {
+        throw "Cannot download $Name $Version from PSGallery. The version may not be published or the gallery may be unavailable. $($_.Exception.Message)"
+    }
+    $manifest = Join-Path $Destination "$Name/$Version/$Name.psd1"
+    if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
+        throw "PSGallery download did not contain the required $Name $Version manifest: $manifest"
+    }
+    return $manifest
+}
+
+function Import-ActionGalleryModule {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [ValidateSet('PSMutant', 'Pester')] [string]$Name,
+        [Parameter(Mandatory)] [string]$Version
+    )
+    if (-not $env:RUNNER_TEMP) { throw 'RUNNER_TEMP is missing.' }
+    $stage = Join-Path $env:RUNNER_TEMP 'psmutant-dependencies'
+    $manifest = Save-ActionGalleryModule -Name $Name -Version $Version -Destination $stage
+    Import-Module -Name $manifest -Force -ErrorAction Stop
+    $moduleBase = Split-Path -Parent $manifest
+    $loaded = @(Get-Module -Name $Name | Where-Object {
+            $_.Version -eq [version]$Version -and
+            [System.IO.Path]::GetFullPath($_.ModuleBase) -eq [System.IO.Path]::GetFullPath($moduleBase)
+        })
+    if ($loaded.Count -ne 1) {
+        throw "$Name $Version was not loaded from the expected PSGallery package directory."
+    }
+    Write-Host "Loaded $Name $Version from PSGallery."
+}
+
+function Write-ActionVersionSummary {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$PSMutantVersion,
+        [Parameter(Mandatory)] [string]$PesterVersion
+    )
+    $powerShellVersion = [string]$PSVersionTable.PSVersion
+    Write-Host "Using PSMutant $PSMutantVersion (PSGallery), Pester $PesterVersion (PSGallery), PowerShell $powerShellVersion."
+    if ($env:GITHUB_OUTPUT) {
+        foreach ($entry in @(
+                "psmutant-version=$PSMutantVersion",
+                "pester-version=$PesterVersion",
+                "powershell-version=$powerShellVersion"
+            )) {
+            Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value $entry -Encoding utf8
+        }
+    }
+    if ($env:GITHUB_STEP_SUMMARY) {
+        Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value @(
+            '## Runtime versions'
+            ''
+            '| Component | Version | Source |'
+            '| --- | --- | --- |'
+            "| PSMutant | $PSMutantVersion | PSGallery |"
+            "| Pester | $PesterVersion | PSGallery |"
+            "| PowerShell | $powerShellVersion | Runner |"
+            ''
+        ) -Encoding utf8
+    }
 }
 
 function Write-ActionResult {
@@ -187,8 +278,11 @@ function Invoke-Action {
             $run.ChangedFile = $changed
         }
 
-        Import-ActionPester -Version $env:PSMUTANT_PESTER_VERSION
-        Import-Module -Name (Join-Path $env:GITHUB_ACTION_PATH 'PSMutant.psd1') -Force -ErrorAction Stop
+        $psmutantVersion = Get-ActionPSMutantVersion -ActionPath $env:GITHUB_ACTION_PATH
+        $pesterVersion = Resolve-ActionPesterVersion -RequestedVersion $env:PSMUTANT_PESTER_VERSION
+        Import-ActionGalleryModule -Name Pester -Version $pesterVersion
+        Import-ActionGalleryModule -Name PSMutant -Version $psmutantVersion
+        Write-ActionVersionSummary -PSMutantVersion $psmutantVersion -PesterVersion $pesterVersion
         $result = Invoke-PSMutation @run
         Write-ActionResult -Result $result
         $wroteResult = $true

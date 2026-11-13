@@ -23,10 +23,9 @@ jobs:
 
       - name: Run PSMutant
         id: mutation
-        uses: Fortigi/PSMutant@main # Replace with a released commit SHA
+        uses: Fortigi/PSMutant@<published-release-commit-sha>
         with:
           config-file: psmutant.config.json
-          pester-version: '6.2.0'
           mode: auto
 
       - name: Keep mutation reports on pass and failure

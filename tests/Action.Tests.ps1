@@ -80,3 +80,57 @@ Describe 'Write-ActionResult' {
         (Get-Content $env:GITHUB_STEP_SUMMARY -Raw) | Should -Match 'Skipped'
     }
 }
+
+Describe 'Gallery dependency contract' {
+    It 'reads the exact module version from the pinned action manifest' {
+        $folder = Join-Path $TestDrive 'fake-action'
+        New-Item -ItemType Directory -Path $folder -Force | Out-Null
+        '@{ ModuleVersion = "1.2.3" }' | Set-Content (Join-Path $folder 'PSMutant.psd1')
+        Get-ActionPSMutantVersion -ActionPath $folder | Should -Be '1.2.3'
+    }
+
+    It 'rejects a missing action manifest' {
+        { Get-ActionPSMutantVersion -ActionPath $TestDrive } | Should -Throw '*Missing PSMutant.psd1*'
+    }
+
+    It 'selects the latest stable compatible Pester version' {
+        Mock Find-Module {
+            @(
+                [pscustomobject]@{ Version = [version]'5.8.0'; PowerShellVersion = '5.1' }
+                [pscustomobject]@{ Version = [version]'5.9.1'; PowerShellVersion = '5.1' }
+                [pscustomobject]@{ Version = [version]'6.2.0'; PowerShellVersion = '5.1' }
+            )
+        }
+        Resolve-ActionPesterVersion -PowerShellVersion ([version]'7.3') | Should -Be '5.8.0'
+        Resolve-ActionPesterVersion -PowerShellVersion ([version]'7.4') | Should -Be '6.2.0'
+        Should -Invoke Find-Module -Exactly -Times 2
+    }
+
+    It 'does not query versions when an explicit compatible Pester version was provided' {
+        Mock Find-Module { throw 'unexpected query' }
+        Resolve-ActionPesterVersion -RequestedVersion '5.8.0' -PowerShellVersion ([version]'7.4') | Should -Be '5.8.0'
+        Should -Not -Invoke Find-Module
+    }
+
+    It 'rejects an incompatible Pester override' {
+        { Resolve-ActionPesterVersion -RequestedVersion '6.2.0' -PowerShellVersion ([version]'7.3') } | Should -Throw '*not supported*'
+    }
+
+    It 'downloads exactly the manifest-derived version from PSGallery' {
+        Mock Save-Module {
+            $folder = Join-Path $Path "$Name/$RequiredVersion"
+            New-Item -ItemType Directory -Path $folder -Force | Out-Null
+            Set-Content -Path (Join-Path $folder "$Name.psd1") -Value '@{}'
+        }
+        $manifest = Save-ActionGalleryModule -Name PSMutant -Version '1.2.3' -Destination $TestDrive
+        $manifest | Should -Be (Join-Path $TestDrive 'PSMutant/1.2.3/PSMutant.psd1')
+        Should -Invoke Save-Module -Exactly -Times 1 -ParameterFilter {
+            $Name -eq 'PSMutant' -and $RequiredVersion -eq '1.2.3' -and $Repository -eq 'PSGallery'
+        }
+    }
+
+    It 'fails when the pinned module version is unavailable in PSGallery' {
+        Mock Save-Module { throw 'not published' }
+        { Save-ActionGalleryModule -Name PSMutant -Version '9.9.9' -Destination $TestDrive } | Should -Throw '*Cannot download PSMutant 9.9.9*'
+    }
+}
